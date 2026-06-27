@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Strompreis-Cockpit · Groß-Gerau</title>
+<meta name="theme-color" content="#0a0e16">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Strompreis">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" href="icon-192.png">
+<link rel="manifest" href="manifest.webmanifest">
+<style>
+  :root{
+    --bg:#0a0e16; --panel:#121a28; --panel2:#0f1622; --line:rgba(255,255,255,.06);
+    --text:#e6ecf5; --dim:#8a98ad; --teal:#2dd4bf; --amber:#f5b942; --red:#ef5350; --blue:#4f9dff;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--text);
+    font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    -webkit-text-size-adjust:100%}
+  .wrap{max-width:1080px;margin:0 auto;padding:max(20px,env(safe-area-inset-top)) 14px 60px}
+  h1{font-size:24px;font-weight:700;margin:0;letter-spacing:-.5px}
+  h2{font-size:15px;font-weight:700;margin:0}
+  .mono{font-family:ui-monospace,"SF Mono",Menlo,monospace}
+  .sub{color:var(--amber);font-weight:600;font-size:14px}
+  .lede{color:var(--dim);font-size:12.5px;margin:6px 0 0;line-height:1.5}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px}
+  .row{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+  .grid-kpi{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}
+  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+  .kpi .l{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.4px}
+  .kpi .v{font-size:22px;font-weight:700;margin-top:2px}
+  .kpi .s{color:var(--dim);font-size:11.5px;margin-top:1px}
+  .grid-fee{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+  label.fee{display:block}
+  label.fee span{color:var(--dim);font-size:11.5px;display:block;margin-bottom:4px}
+  .inp{display:flex;align-items:center;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 10px}
+  .inp input{background:transparent;border:none;color:var(--text);font-size:14px;width:100%;outline:none;
+    font-family:ui-monospace,monospace}
+  .inp .u{color:var(--dim);font-size:11px;white-space:nowrap}
+  button{font-family:inherit;cursor:pointer}
+  .btn{background:var(--teal);color:#04221d;border:1px solid var(--teal);border-radius:8px;
+    padding:7px 13px;font-size:12.5px;font-weight:600}
+  .btn.ghost{background:transparent;color:var(--dim);border-color:var(--line)}
+  .tog{background:transparent;color:var(--dim);border:1px solid var(--line);border-radius:8px;
+    padding:5px 10px;font-size:12px;font-weight:600}
+  .tog.on{background:var(--teal);color:#04221d;border-color:var(--teal)}
+  .legend{display:flex;gap:16px;margin-top:6px;flex-wrap:wrap}
+  .legend span{display:flex;align-items:center;gap:6px;color:var(--dim);font-size:12px}
+  .swatch{width:14px;height:3px;border-radius:2px}
+  .chartwrap{position:relative;width:100%}
+  svg{display:block;width:100%;height:auto;touch-action:none}
+  .tip{position:absolute;pointer-events:none;background:var(--panel2);border:1px solid var(--line);
+    border-radius:10px;padding:8px 11px;font-size:12.5px;opacity:0;transform:translate(-50%,-110%);
+    transition:opacity .08s;white-space:nowrap;z-index:5}
+  .tip b{font-weight:700}
+  .tdot{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px;vertical-align:middle}
+  .tablewrap{max-height:420px;overflow:auto;border-radius:10px;border:1px solid var(--line)}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;font-family:ui-monospace,monospace}
+  thead th{position:sticky;top:0;background:var(--panel2);color:var(--dim);font-weight:600;
+    padding:9px 10px;text-align:right;white-space:nowrap}
+  thead th.l{text-align:left}
+  tbody td{padding:7px 10px;text-align:right;white-space:nowrap;border-top:1px solid var(--line)}
+  tbody td.l{text-align:left;color:var(--dim)}
+  tbody td.dim{color:var(--dim)}
+  .note{color:var(--dim);font-size:11.5px;line-height:1.6;margin-top:4px}
+  .prog{height:6px;background:#1d2839;border-radius:99px;overflow:hidden}
+  .prog>div{height:100%;width:0;background:var(--teal);transition:width .3s}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header style="margin-bottom:18px">
+    <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+      <h1>Strompreis-Cockpit</h1><span class="sub">Groß-Gerau · dynamisch (Tibber-Modell)</span>
+    </div>
+    <p class="lede">EPEX-Spot Day-Ahead (DE-LU) der letzten 6 Monate, umgerechnet auf den Tibber-Endpreis
+      inkl. Netzentgelte, Steuern, Umlagen &amp; MwSt. Quelle: Fraunhofer ISE / energy-charts.info · ct/kWh.</p>
+  </header>
+
+  <div id="loading" class="panel">
+    <div id="progtext" style="color:var(--dim);font-size:14px;margin-bottom:10px">Lade Börsendaten… 0%</div>
+    <div class="prog"><div id="progbar"></div></div>
+  </div>
+
+  <div id="errbox" class="panel hidden">
+    <div style="color:var(--red);font-size:14px;font-weight:600;margin-bottom:6px">Daten konnten nicht geladen werden</div>
+    <div id="errmsg" class="note"></div>
+    <button class="btn" style="margin-top:10px" onclick="App.load()">Erneut laden</button>
+  </div>
+
+  <main id="app" class="hidden">
+    <div class="grid-kpi" id="kpis"></div>
+
+    <div class="panel">
+      <div class="row" style="margin-bottom:12px">
+        <h2>Gebührenmodell <span style="color:var(--dim);font-weight:400;font-size:12.5px">(netto, an deinen Tibber-Vertrag anpassen)</span></h2>
+        <button class="btn ghost" onclick="App.reset()">Zurücksetzen</button>
+      </div>
+      <div class="grid-fee" id="fees"></div>
+      <div class="note" id="feeinfo" style="margin-top:12px"></div>
+    </div>
+
+    <div class="panel">
+      <div class="row" style="margin-bottom:6px">
+        <h2>Tägliche Preisspanne (Tief – Hoch)</h2>
+        <div style="display:flex;gap:6px">
+          <button class="tog on" id="t-end" onclick="App.setMode('end')">Tibber-Endpreis</button>
+          <button class="tog" id="t-spot" onclick="App.setMode('spot')">Reiner Börsenpreis</button>
+        </div>
+      </div>
+      <div class="chartwrap" id="bandwrap"><div class="tip" id="bandtip"></div></div>
+      <div class="legend" id="bandlegend"></div>
+    </div>
+
+    <div class="panel">
+      <h2 style="margin-bottom:2px">Durchschnittlicher Tagesverlauf</h2>
+      <p class="note" id="profinfo" style="margin:0 0 8px"></p>
+      <div class="chartwrap" id="profwrap"></div>
+    </div>
+
+    <div class="panel">
+      <div class="row" style="margin-bottom:10px">
+        <h2>Tagestabelle <span id="daycount" style="color:var(--dim);font-weight:400;font-size:12.5px"></span></h2>
+        <button class="btn" onclick="App.csv()">CSV exportieren</button>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <thead><tr>
+            <th class="l">Datum</th><th>Ø</th><th>Tief</th><th>Zeit</th><th>Hoch</th><th>Zeit</th><th>Spread</th>
+          </tr></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <p class="note">Zeitstempel in Europe/Berlin. Granularität = veröffentlichte Day-Ahead-Werte (stündlich/viertelstündlich).
+      Netzentgelt &amp; Konzessionsabgabe sind ortsabhängig – im Kernort Groß-Gerau ist die GGV Netzbetreiber,
+      im umliegenden Kreis e-netz Südhessen. Trag die Werte deiner Tibber-Abrechnung ein, dann stimmt der Endpreis auf den Cent.
+      Einstellungen werden lokal auf dem Gerät gespeichert.</p>
+  </main>
+</div>
+
+<script>
+"use strict";
+var C={teal:"#2dd4bf",amber:"#f5b942",red:"#ef5350",blue:"#4f9dff",dim:"#8a98ad",text:"#e6ecf5",line:"rgba(255,255,255,.08)"};
+var DEFAULTS={netzentgelt:7.5,stromsteuer:2.05,umlagen:2.946,konzession:1.59,aufschlag:1.79,mwst:19,grundpreis:5.99};
+var FEE_FIELDS=[
+  ["netzentgelt","Netzentgelt","ct/kWh"],["stromsteuer","Stromsteuer","ct/kWh"],
+  ["umlagen","Umlagen (§19/KWKG/Offshore)","ct/kWh"],["konzession","Konzessionsabgabe","ct/kWh"],
+  ["aufschlag","Tibber-Aufschlag","ct/kWh"],["mwst","MwSt.","%"]
+];
+var API="https://api.energy-charts.info/price";
+var LS="gg_strom_fees_v1";
+
+var fDay=new Intl.DateTimeFormat("en-CA",{timeZone:"Europe/Berlin",year:"numeric",month:"2-digit",day:"2-digit"});
+var fTime=new Intl.DateTimeFormat("de-DE",{timeZone:"Europe/Berlin",hour:"2-digit",minute:"2-digit"});
+var fHour=new Intl.DateTimeFormat("en-GB",{timeZone:"Europe/Berlin",hour:"2-digit",hour12:false});
+var fLabel=new Intl.DateTimeFormat("de-DE",{timeZone:"Europe/Berlin",day:"2-digit",month:"2-digit"});
+var fLong=new Intl.DateTimeFormat("de-DE",{timeZone:"Europe/Berlin",weekday:"short",day:"2-digit",month:"2-digit",year:"numeric"});
+
+function num(v,d){ if(d==null)d=1; return (v==null||isNaN(v))?"–":v.toLocaleString("de-DE",{minimumFractionDigits:d,maximumFractionDigits:d}); }
+function iso(dt){return dt.getFullYear()+"-"+String(dt.getMonth()+1).padStart(2,"0")+"-"+String(dt.getDate()).padStart(2,"0");}
+function clamp(x,a,b){return Math.max(a,Math.min(b,x));}
+
+function heat(v,lo,hi){
+  if(v==null||hi===lo)return C.dim;
+  var t=clamp((v-lo)/(hi-lo),0,1);
+  var stops=[[45,212,191],[245,185,66],[239,83,80]];
+  var seg=t<0.5?0:1, lt=t<0.5?t/0.5:(t-0.5)/0.5;
+  var a=stops[seg],b=stops[seg+1];
+  var c=a.map(function(x,i){return Math.round(x+(b[i]-x)*lt);});
+  return "rgb("+c[0]+","+c[1]+","+c[2]+")";
+}
+
+function buildChunks(){
+  var end=new Date(), start=new Date(); start.setMonth(start.getMonth()-6);
+  var chunks=[], cur=new Date(start.getFullYear(),start.getMonth(),1);
+  while(cur<=end){
+    var cs=new Date(cur.getFullYear(),cur.getMonth(),1);
+    var ce=new Date(cur.getFullYear(),cur.getMonth()+1,0);
+    chunks.push({start:iso(cs<start?start:cs), end:iso(ce>end?end:ce)});
+    cur=new Date(cur.getFullYear(),cur.getMonth()+1,1);
+  }
+  return chunks;
+}
+
+var App=(function(){
+  var raw=null, fees=Object.assign({},DEFAULTS), mode="end", calc=null, failed=0;
+
+  function loadFees(){ try{var s=localStorage.getItem(LS); if(s)fees=Object.assign({},DEFAULTS,JSON.parse(s));}catch(e){} }
+  function saveFees(){ try{localStorage.setItem(LS,JSON.stringify(fees));}catch(e){} }
+
+  function show(id,on){document.getElementById(id).classList.toggle("hidden",!on);}
+
+  async function load(){
+    show("loading",true); show("errbox",false); show("app",false); failed=0;
+    document.getElementById("progbar").style.width="0%";
+    document.getElementById("progtext").textContent="Lade Börsendaten… 0%";
+    try{
+      var chunks=buildChunks(), map=new Map();
+      for(var i=0;i<chunks.length;i++){
+        var url=API+"?bzn=DE-LU&start="+chunks[i].start+"&end="+chunks[i].end;
+        try{
+          var r=await fetch(url);
+          if(!r.ok) throw new Error("HTTP "+r.status);
+          var j=await r.json();
+          var secs=j.unix_seconds||[], pr=j.price||[];
+          for(var k=0;k<secs.length;k++){ if(pr[k]==null)continue; map.set(secs[k],pr[k]/10); }
+        }catch(e){ failed++; }
+        var p=Math.round((i+1)/chunks.length*100);
+        document.getElementById("progbar").style.width=p+"%";
+        document.getElementById("progtext").textContent="Lade Börsendaten… "+p+"%";
+      }
+      var sec=Array.from(map.keys()).sort(function(a,b){return a-b;});
+      if(!sec.length) throw new Error("Keine Daten erhalten (evtl. blockiert die Vorschau den Zugriff – auf GitHub Pages/Safari öffnen).");
+      raw={sec:sec, spot:sec.map(function(s){return map.get(s);})};
+      compute(); renderAll(); show("loading",false); show("app",true);
+    }catch(e){
+      show("loading",false); show("errbox",true);
+      document.getElementById("errmsg").textContent=(e.message||"Unbekannter Fehler")+". Internetverbindung prüfen und erneut versuchen.";
+    }
+  }
+
+  function compute(){
+    var addNet=(+fees.netzentgelt)+(+fees.stromsteuer)+(+fees.umlagen)+(+fees.konzession)+(+fees.aufschlag);
+    var vat=1+(+fees.mwst)/100;
+    var toEnd=function(s){return (s+addNet)*vat;};
+    var days=new Map(), hourSum=new Array(24).fill(0), hourCnt=new Array(24).fill(0), neg=0;
+    for(var i=0;i<raw.sec.length;i++){
+      var ms=raw.sec[i]*1000, dt=new Date(ms);
+      var dk=fDay.format(dt), end=toEnd(raw.spot[i]), h=parseInt(fHour.format(dt),10);
+      hourSum[h]+=end; hourCnt[h]++; if(raw.spot[i]<0)neg++;
+      var rec=days.get(dk);
+      if(!rec){rec={dk:dk,ms0:ms,sum:0,n:0,min:Infinity,max:-Infinity,minT:ms,maxT:ms,minSpot:0,maxSpot:0};days.set(dk,rec);}
+      rec.sum+=end; rec.n++;
+      if(end<rec.min){rec.min=end;rec.minT=ms;rec.minSpot=raw.spot[i];}
+      if(end>rec.max){rec.max=end;rec.maxT=ms;rec.maxSpot=raw.spot[i];}
+    }
+    var daily=Array.from(days.values()).sort(function(a,b){return a.ms0-b.ms0;}).map(function(r){
+      return {dk:r.dk,ms0:r.ms0,label:fLabel.format(new Date(r.ms0)),long:fLong.format(new Date(r.ms0)),
+        avg:r.sum/r.n,min:r.min,max:r.max,spread:r.max-r.min,
+        minTime:fTime.format(new Date(r.minT)),maxTime:fTime.format(new Date(r.maxT)),
+        minSpot:r.minSpot,maxSpot:r.maxSpot};
+    });
+    var gMin=null,gMax=null,sMin=0,sMax=0,sSpr=0;
+    daily.forEach(function(d){ if(!gMin||d.min<gMin.min)gMin=d; if(!gMax||d.max>gMax.max)gMax=d; sMin+=d.min;sMax+=d.max;sSpr+=d.spread; });
+    var profile=hourSum.map(function(s,h){return {h:h,label:String(h).padStart(2,"0"),avg:hourCnt[h]?s/hourCnt[h]:null};});
+    var pv=profile.filter(function(p){return p.avg!=null;}).map(function(p){return p.avg;});
+    var cheap=profile.reduce(function(a,b){return (b.avg!=null&&(!a||b.avg<a.avg))?b:a;},null);
+    var dear=profile.reduce(function(a,b){return (b.avg!=null&&(!a||b.avg>a.avg))?b:a;},null);
+    calc={daily:daily,gMin:gMin,gMax:gMax,avgMin:sMin/daily.length,avgMax:sMax/daily.length,avgSpread:sSpr/daily.length,
+      profile:profile,profLo:Math.min.apply(null,pv),profHi:Math.max.apply(null,pv),
+      cheap:cheap,dear:dear,neg:neg,addNet:addNet,vat:vat};
+  }
+
+  // ---- SVG helpers ----
+  function svgEl(name,attrs){var e=document.createElementNS("http://www.w3.org/2000/svg",name);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+  function niceTicks(lo,hi,n){var ticks=[];for(var i=0;i<=n;i++)ticks.push(lo+(hi-lo)*i/n);return ticks;}
+
+  function renderBand(){
+    var wrap=document.getElementById("bandwrap");
+    Array.from(wrap.querySelectorAll("svg")).forEach(function(s){s.remove();});
+    var W=720,H=300,padL=44,padR=10,padT=10,padB=22;
+    var d=calc.daily, n=d.length;
+    var getMin=function(x){return mode==="end"?x.min:x.minSpot;};
+    var getMax=function(x){return mode==="end"?x.max:x.maxSpot;};
+    var getAvg=function(x){return x.avg;};
+    var lo=Infinity,hi=-Infinity;
+    d.forEach(function(x){lo=Math.min(lo,getMin(x));hi=Math.max(hi,getMax(x));});
+    lo=Math.min(lo,0); var pad=(hi-lo)*0.05; hi+=pad; lo-=pad;
+    var sx=function(i){return padL+(n<=1?0:i*(W-padL-padR)/(n-1));};
+    var sy=function(v){return padT+(1-(v-lo)/(hi-lo))*(H-padT-padB);};
+    var svg=svgEl("svg",{viewBox:"0 0 "+W+" "+H,preserveAspectRatio:"none"});
+    svg.style.height="300px";
+    // gridlines + y labels
+    niceTicks(lo,hi,4).forEach(function(t){
+      var y=sy(t);
+      svg.appendChild(svgEl("line",{x1:padL,y1:y,x2:W-padR,y2:y,stroke:C.line,"stroke-width":1}));
+      var tx=svgEl("text",{x:padL-6,y:y+3,fill:C.dim,"font-size":10,"text-anchor":"end","font-family":"ui-monospace,monospace"});
+      tx.textContent=num(t,0); svg.appendChild(tx);
+    });
+    if(lo<0){var z=sy(0);svg.appendChild(svgEl("line",{x1:padL,y1:z,x2:W-padR,y2:z,stroke:C.dim,"stroke-dasharray":"3 3","stroke-width":1}));}
+    // x labels (~8)
+    var step=Math.max(1,Math.floor(n/8));
+    for(var i=0;i<n;i+=step){
+      var tx2=svgEl("text",{x:sx(i),y:H-6,fill:C.dim,"font-size":10,"text-anchor":"middle"});
+      tx2.textContent=d[i].label; svg.appendChild(tx2);
+    }
+    // band polygon
+    var top="",bot="";
+    for(var i2=0;i2<n;i2++){top+=(i2?" L":"M")+sx(i2)+" "+sy(getMax(d[i2]));}
+    for(var i3=n-1;i3>=0;i3--){bot+=" L"+sx(i3)+" "+sy(getMin(d[i3]));}
+    svg.appendChild(svgEl("path",{d:top+bot+" Z",fill:C.amber,"fill-opacity":0.16,stroke:"none"}));
+    // lines
+    function poly(getter,color,w,dash){
+      var p="";for(var i=0;i<n;i++)p+=(i?" L":"M")+sx(i)+" "+sy(getter(d[i]));
+      var a={d:p,fill:"none",stroke:color,"stroke-width":w};if(dash)a["stroke-dasharray"]=dash;
+      svg.appendChild(svgEl("path",a));
+    }
+    poly(getMax,C.amber,1.6); poly(getMin,C.teal,1.6);
+    if(mode==="end")poly(getAvg,C.blue,1,"4 3");
+    // guide + interaction
+    var guide=svgEl("line",{x1:padL,y1:padT,x2:padL,y2:H-padB,stroke:C.dim,"stroke-width":1,opacity:0});
+    svg.appendChild(guide);
+    wrap.insertBefore(svg,wrap.firstChild);
+    var tip=document.getElementById("bandtip");
+    function move(e){
+      var rect=svg.getBoundingClientRect();
+      var cx=(e.touches?e.touches[0].clientX:e.clientX)-rect.left;
+      var ratio=clamp(cx/rect.width,0,1), idx=Math.round(ratio*(n-1));
+      var x=sx(idx); guide.setAttribute("x1",x);guide.setAttribute("x2",x);guide.setAttribute("opacity",0.6);
+      var r=d[idx];
+      tip.innerHTML="<b>"+r.long+"</b><br>"+
+        "<span class='tdot' style='background:"+C.teal+"'></span>Tief <b class='mono'>"+num(getMin(r),2)+" ct</b> · "+r.minTime+"<br>"+
+        "<span class='tdot' style='background:"+C.amber+"'></span>Hoch <b class='mono'>"+num(getMax(r),2)+" ct</b> · "+r.maxTime+
+        (mode==="end"?"<br><span class='tdot' style='background:"+C.blue+"'></span>Ø <b class='mono'>"+num(r.avg,2)+" ct</b>":"");
+      var px=clamp((x/W)*rect.width,60,rect.width-60);
+      tip.style.left=px+"px"; tip.style.top="18px"; tip.style.opacity=1;
+    }
+    function leave(){tip.style.opacity=0;guide.setAttribute("opacity",0);}
+    svg.addEventListener("pointermove",move);
+    svg.addEventListener("pointerleave",leave);
+    svg.addEventListener("touchmove",function(e){move(e);},{passive:true});
+    svg.addEventListener("touchend",leave);
+    // legend
+    var items=mode==="end"?[["Hoch",C.amber],["Tief",C.teal],["Ø",C.blue]]:[["Hoch",C.amber],["Tief",C.teal]];
+    document.getElementById("bandlegend").innerHTML=items.map(function(it){
+      return "<span><span class='swatch' style='background:"+it[1]+"'></span>"+it[0]+"</span>";}).join("");
+  }
+
+  function renderProfile(){
+    var wrap=document.getElementById("profwrap");
+    Array.from(wrap.querySelectorAll("svg")).forEach(function(s){s.remove();});
+    var W=720,H=210,padL=44,padR=10,padT=8,padB=22;
+    var p=calc.profile, lo=Math.min(0,calc.profLo*0.96), hi=calc.profHi*1.02;
+    var sy=function(v){return padT+(1-(v-lo)/(hi-lo))*(H-padT-padB);};
+    var bw=(W-padL-padR)/24;
+    var svg=svgEl("svg",{viewBox:"0 0 "+W+" "+H,preserveAspectRatio:"none"});svg.style.height="210px";
+    niceTicks(lo,hi,4).forEach(function(t){
+      var y=sy(t);
+      svg.appendChild(svgEl("line",{x1:padL,y1:y,x2:W-padR,y2:y,stroke:C.line,"stroke-width":1}));
+      var tx=svgEl("text",{x:padL-6,y:y+3,fill:C.dim,"font-size":10,"text-anchor":"end","font-family":"ui-monospace,monospace"});
+      tx.textContent=num(t,0);svg.appendChild(tx);
+    });
+    p.forEach(function(h,i){
+      if(h.avg==null)return;
+      var x=padL+i*bw+bw*0.12, w=bw*0.76, y=sy(h.avg), hh=(H-padB)-y;
+      var bar=svgEl("rect",{x:x,y:y,width:w,height:Math.max(0,hh),rx:3,fill:heat(h.avg,calc.profLo,calc.profHi)});
+      var ti=svgEl("title");ti.textContent=h.label+":00 Uhr · "+num(h.avg,2)+" ct/kWh";bar.appendChild(ti);
+      svg.appendChild(bar);
+      if(i%2===0){var tx=svgEl("text",{x:padL+i*bw+bw/2,y:H-6,fill:C.dim,"font-size":10,"text-anchor":"middle"});tx.textContent=h.label;svg.appendChild(tx);}
+    });
+    wrap.appendChild(svg);
+    document.getElementById("profinfo").innerHTML=
+      "Mittlerer Tibber-Endpreis je Stunde über 6 Monate – günstigste Stunde <b style='color:"+C.teal+"'>"+
+      calc.cheap.label+":00 Uhr ("+num(calc.cheap.avg,1)+" ct)</b>, teuerste <b style='color:"+C.red+"'>"+
+      calc.dear.label+":00 Uhr ("+num(calc.dear.avg,1)+" ct)</b>. Ideal fürs EV-/Wallbox-Timing.";
+  }
+
+  function renderKpis(){
+    var k=[
+      ["Günstigster Moment",num(calc.gMin.min,1)+" ct",calc.gMin.long+" · "+calc.gMin.minTime,C.teal],
+      ["Teuerster Moment",num(calc.gMax.max,1)+" ct",calc.gMax.long+" · "+calc.gMax.maxTime,C.red],
+      ["Ø Tagestief",num(calc.avgMin,1)+" ct","Mittel über alle Tage",C.teal],
+      ["Ø Tageshoch",num(calc.avgMax,1)+" ct","Mittel über alle Tage",C.amber],
+      ["Ø Tages-Spreizung",num(calc.avgSpread,1)+" ct","Hoch minus Tief",C.blue],
+      ["Negative Börsenpreise",String(calc.neg),"Intervalle (Spot < 0)",C.teal]
+    ];
+    document.getElementById("kpis").innerHTML=k.map(function(x){
+      return "<div class='kpi'><div class='l'>"+x[0]+"</div><div class='v mono' style='color:"+x[3]+"'>"+x[1]+"</div><div class='s'>"+x[2]+"</div></div>";
+    }).join("");
+  }
+
+  function renderFees(){
+    document.getElementById("fees").innerHTML=FEE_FIELDS.map(function(f){
+      return "<label class='fee'><span>"+f[1]+"</span><div class='inp'>"+
+        "<input type='number' step='0.01' value='"+fees[f[0]]+"' data-k='"+f[0]+"'>"+
+        "<span class='u'>"+f[2]+"</span></div></label>";
+    }).join("");
+    Array.from(document.querySelectorAll("#fees input")).forEach(function(inp){
+      inp.addEventListener("input",function(){
+        fees[inp.dataset.k]=inp.value===""?0:parseFloat(inp.value);
+        saveFees(); compute(); renderKpis(); renderBand(); renderProfile(); renderTable(); renderFeeInfo();
+      });
+    });
+  }
+  function renderFeeInfo(){
+    document.getElementById("feeinfo").innerHTML=
+      "Fixe Aufschläge netto: <b style='color:"+C.text+"'>"+num(calc.addNet,2)+" ct/kWh</b> · Formel: "+
+      "<span class='mono' style='color:"+C.text+"'>(Börse + "+num(calc.addNet,2)+") × "+num(fees.mwst/100+1,2)+"</span>. "+
+      "Bei Börse 0 ct ⇒ <b style='color:"+C.text+"'>"+num((0+calc.addNet)*calc.vat,1)+" ct/kWh</b>. "+
+      "Grundpreis "+num(fees.grundpreis,2)+" €/Monat fällt zusätzlich an (verändert die Kurve nicht).";
+  }
+
+  function renderTable(){
+    var lo=Math.min.apply(null,calc.daily.map(function(d){return d.min;}));
+    var hi=Math.max.apply(null,calc.daily.map(function(d){return d.max;}));
+    var rows=calc.daily.slice().reverse().map(function(d){
+      return "<tr><td class='l'>"+d.long+"</td><td>"+num(d.avg,1)+"</td>"+
+        "<td style='color:"+heat(d.min,lo,hi)+";font-weight:700'>"+num(d.min,1)+"</td><td class='dim'>"+d.minTime+"</td>"+
+        "<td style='color:"+heat(d.max,lo,hi)+";font-weight:700'>"+num(d.max,1)+"</td><td class='dim'>"+d.maxTime+"</td>"+
+        "<td>"+num(d.spread,1)+"</td></tr>";
+    }).join("");
+    document.getElementById("tbody").innerHTML=rows;
+    document.getElementById("daycount").textContent="("+calc.daily.length+" Tage)";
+  }
+
+  function renderAll(){renderKpis();renderFees();renderFeeInfo();renderBand();renderProfile();renderTable();}
+
+  function setMode(m){mode=m;document.getElementById("t-end").classList.toggle("on",m==="end");
+    document.getElementById("t-spot").classList.toggle("on",m==="spot");renderBand();}
+  function reset(){fees=Object.assign({},DEFAULTS);saveFees();compute();renderAll();}
+  function csv(){
+    var head="Datum;O ct/kWh;Min ct/kWh;Min Zeit;Max ct/kWh;Max Zeit;Spread ct/kWh\n";
+    var body=calc.daily.map(function(d){return [d.dk,num(d.avg,2),num(d.min,2),d.minTime,num(d.max,2),d.maxTime,num(d.spread,2)].join(";");}).join("\n");
+    var blob=new Blob([head+body],{type:"text/csv;charset=utf-8"});
+    var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="strompreise_grossgerau_6monate.csv";
+    document.body.appendChild(a);a.click();a.remove();
+  }
+
+  loadFees();
+  window.addEventListener("resize",function(){if(calc){renderBand();renderProfile();}});
+  return {load:load,setMode:setMode,reset:reset,csv:csv};
+})();
+if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('sw.js').catch(function(){});});}
+App.load();
+</script>
+</body>
+</html>
