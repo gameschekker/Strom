@@ -236,26 +236,33 @@ var App=(function(){
     setProg(0,"Verbinde…");
     var map=new Map(), firstErr=null;
     function ingest(d){ for(var k=0;k<d.secs.length;k++){ if(d.pr[k]==null)continue; map.set(d.secs[k],d.pr[k]/10); } }
+    function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
+    function latestMs(){ var m=0; map.forEach(function(_,s){ if(s>m)m=s; }); return m*1000; }
     try{
       var end=new Date(), start=new Date(); start.setMonth(start.getMonth()-6);
-      await pickTransport(); // wählt direkten Weg oder Proxy
-      setProg(15,"Lade Börsendaten…");
-      if(transport===TRANSPORTS[0]){
-        // direkter Weg: ein Request über den gesamten Zeitraum, sonst monatsweise
-        try{ ingest(await fetchRange(iso(start),iso(end))); setProg(100,"Fertig"); }
-        catch(e1){ firstErr=e1; await monthly(); }
-      }else{
-        // über Proxy lieber kleine Häppchen
-        await monthly();
-      }
-      async function monthly(){
+      await pickTransport(); // direkter Weg oder Proxy
+      setProg(20,"Lade Börsendaten…");
+      // Primär: EIN Request über den gesamten Zeitraum (auch über Proxy) – vermeidet Rate-Limits
+      try{
+        ingest(await fetchRange(iso(start),iso(end)));
+        setProg(85,"Lade Börsendaten…");
+      }catch(e1){
+        firstErr=e1;
+        // Notfall: monatsweise mit kleiner Pause gegen Proxy-Drosselung
         var chunks=buildChunks();
         for(var i=0;i<chunks.length;i++){
           try{ ingest(await fetchRange(chunks[i].start,chunks[i].end)); }
           catch(e2){ if(!firstErr)firstErr=e2; }
-          setProg(Math.round((i+1)/chunks.length*100),"Lade Börsendaten…");
+          setProg(20+Math.round((i+1)/chunks.length*65),"Lade Börsendaten…");
+          await sleep(400);
         }
       }
+      // Aktuellen Rand auffüllen, falls die Antwort gekürzt wurde (z. B. durch einen Proxy)
+      var lm=latestMs();
+      if(lm>0 && (Date.now()-lm) > 36*3600*1000){
+        try{ ingest(await fetchRange(iso(new Date(lm)), iso(end))); }catch(e3){}
+      }
+      setProg(100,"Fertig");
       var sec=Array.from(map.keys()).sort(function(a,b){return a-b;});
       if(!sec.length) throw (firstErr||new Error("Keine Daten erhalten"));
       raw={sec:sec, spot:sec.map(function(s){return map.get(s);})};
