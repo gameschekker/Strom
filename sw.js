@@ -1,6 +1,6 @@
 // Strompreis-Cockpit – Service Worker
-// Cache-Version bei jedem Update erhöhen (v1 -> v2 ...), damit iOS die neuen Dateien lädt.
-const CACHE = "strompreis-v1";
+// Cache-Version bei jedem Update erhöhen (v2 -> v3 ...), damit iOS die neuen Dateien lädt.
+const CACHE = "strompreis-v2";
 
 const SHELL = [
   "./",
@@ -12,13 +12,11 @@ const SHELL = [
   "apple-touch-icon.png"
 ];
 
-// App-Shell beim Installieren ablegen
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
   self.skipWaiting();
 });
 
-// Alte Caches aufräumen
 self.addEventListener("activate", (e) => {
   e.waitUntil(
     caches.keys().then((keys) =>
@@ -31,11 +29,10 @@ self.addEventListener("activate", (e) => {
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
 
-  // Börsenpreise immer live aus dem Netz holen – niemals cachen (sonst veraltete Preise)
-  if (url.hostname.includes("energy-charts.info")) {
-    e.respondWith(fetch(e.request));
-    return;
-  }
+  // WICHTIG: Nur eigene Dateien behandeln. Alles Fremde (z. B. die Börsenpreis-API)
+  // wird NICHT abgefangen – der Browser holt es direkt, wie ohne Service Worker.
+  if (url.origin !== self.location.origin) return;
+  if (e.request.method !== "GET") return;
 
   // App-Shell: erst Cache, dann Netz (und frisch nachcachen)
   e.respondWith(
@@ -43,7 +40,7 @@ self.addEventListener("fetch", (e) => {
       if (hit) return hit;
       return fetch(e.request)
         .then((res) => {
-          if (e.request.method === "GET" && res && res.status === 200 && url.origin === self.location.origin) {
+          if (res && res.status === 200) {
             const copy = res.clone();
             caches.open(CACHE).then((c) => c.put(e.request, copy));
           }

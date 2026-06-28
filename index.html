@@ -197,32 +197,51 @@ var App=(function(){
 
   function show(id,on){document.getElementById(id).classList.toggle("hidden",!on);}
 
+  function setProg(p,txt){
+    document.getElementById("progbar").style.width=p+"%";
+    document.getElementById("progtext").textContent=txt+" "+p+"%";
+  }
+  async function fetchRange(s,e){
+    var url=API+"?bzn=DE-LU&start="+s+"&end="+e;
+    var r=await fetch(url,{cache:"no-store",mode:"cors"});
+    if(!r.ok) throw new Error("HTTP "+r.status+" ("+s+"…"+e+")");
+    var j=await r.json();
+    return {secs:j.unix_seconds||[], pr:j.price||[]};
+  }
   async function load(){
-    show("loading",true); show("errbox",false); show("app",false); failed=0;
-    document.getElementById("progbar").style.width="0%";
-    document.getElementById("progtext").textContent="Lade Börsendaten… 0%";
+    show("loading",true); show("errbox",false); show("app",false);
+    setProg(0,"Lade Börsendaten…");
+    var map=new Map(), firstErr=null;
+    function ingest(d){ for(var k=0;k<d.secs.length;k++){ if(d.pr[k]==null)continue; map.set(d.secs[k],d.pr[k]/10); } }
     try{
-      var chunks=buildChunks(), map=new Map();
-      for(var i=0;i<chunks.length;i++){
-        var url=API+"?bzn=DE-LU&start="+chunks[i].start+"&end="+chunks[i].end;
-        try{
-          var r=await fetch(url);
-          if(!r.ok) throw new Error("HTTP "+r.status);
-          var j=await r.json();
-          var secs=j.unix_seconds||[], pr=j.price||[];
-          for(var k=0;k<secs.length;k++){ if(pr[k]==null)continue; map.set(secs[k],pr[k]/10); }
-        }catch(e){ failed++; }
-        var p=Math.round((i+1)/chunks.length*100);
-        document.getElementById("progbar").style.width=p+"%";
-        document.getElementById("progtext").textContent="Lade Börsendaten… "+p+"%";
+      var end=new Date(), start=new Date(); start.setMonth(start.getMonth()-6);
+      // 1) Ein einziger Request über den gesamten Zeitraum
+      try{
+        setProg(25,"Lade Börsendaten…");
+        ingest(await fetchRange(iso(start),iso(end)));
+        setProg(100,"Fertig");
+      }catch(e1){
+        // 2) Fallback: monatsweise (z. B. falls ein langer Range scheitert)
+        firstErr=e1;
+        var chunks=buildChunks();
+        for(var i=0;i<chunks.length;i++){
+          try{ ingest(await fetchRange(chunks[i].start,chunks[i].end)); }
+          catch(e2){ if(!firstErr)firstErr=e2; }
+          setProg(Math.round((i+1)/chunks.length*100),"Lade Börsendaten…");
+        }
       }
       var sec=Array.from(map.keys()).sort(function(a,b){return a-b;});
-      if(!sec.length) throw new Error("Keine Daten erhalten (evtl. blockiert die Vorschau den Zugriff – auf GitHub Pages/Safari öffnen).");
+      if(!sec.length) throw (firstErr||new Error("Keine Daten erhalten"));
       raw={sec:sec, spot:sec.map(function(s){return map.get(s);})};
       compute(); renderAll(); show("loading",false); show("app",true);
     }catch(e){
       show("loading",false); show("errbox",true);
-      document.getElementById("errmsg").textContent=(e.message||"Unbekannter Fehler")+". Internetverbindung prüfen und erneut versuchen.";
+      var nm=(e&&e.name)?e.name:"Error", ms=(e&&e.message)?e.message:"Unbekannter Fehler";
+      document.getElementById("errmsg").innerHTML=
+        "<b style='color:var(--text)'>"+nm+":</b> "+ms+
+        "<br><span style='color:var(--dim)'>Geladene Datenpunkte: "+map.size+". "+
+        "Steht hier <i>TypeError / Load failed / Failed to fetch</i>, blockiert der Browser den Zugriff (CORS/Netz) – "+
+        "nicht die API. Seite komplett neu laden (Cache leeren) und mit echter Internetverbindung erneut versuchen.</span>";
     }
   }
 
