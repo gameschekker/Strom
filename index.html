@@ -78,7 +78,7 @@
     <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
       <h1>Strompreis-Cockpit</h1><span class="sub">Groß-Gerau · dynamisch (Tibber-Modell)</span>
     </div>
-    <p class="lede" id="lede">EPEX-Spot Day-Ahead (DE-LU) der letzten 6 Monate, umgerechnet auf den Tibber-Endpreis
+    <p class="lede" id="lede">EPEX-Spot Day-Ahead (DE-LU) der letzten 3 Monate, umgerechnet auf den Tibber-Endpreis
       inkl. Netzentgelte, Steuern, Umlagen &amp; MwSt. Quelle: Fraunhofer ISE / energy-charts.info · ct/kWh.</p>
   </header>
 
@@ -156,6 +156,7 @@ var FEE_FIELDS=[
 ];
 var API="https://api.energy-charts.info/price";
 var LS="gg_strom_fees_v1";
+var MONTHS=3; // Zeitfenster in Monaten (rollierend ab heute)
 
 var fDay=new Intl.DateTimeFormat("en-CA",{timeZone:"Europe/Berlin",year:"numeric",month:"2-digit",day:"2-digit"});
 var fTime=new Intl.DateTimeFormat("de-DE",{timeZone:"Europe/Berlin",hour:"2-digit",minute:"2-digit"});
@@ -178,7 +179,7 @@ function heat(v,lo,hi){
 }
 
 function buildChunks(){
-  var end=new Date(), start=new Date(); start.setMonth(start.getMonth()-6);
+  var end=new Date(), start=new Date(); start.setMonth(start.getMonth()-MONTHS);
   var chunks=[], cur=new Date(start.getFullYear(),start.getMonth(),1);
   while(cur<=end){
     var cs=new Date(cur.getFullYear(),cur.getMonth(),1);
@@ -204,6 +205,7 @@ var App=(function(){
   // Zugriffswege: zuerst direkt, dann über CORS-Proxys (falls der Browser/das Netz den direkten Weg blockt)
   var TRANSPORTS=[
     {label:"direkt", wrap:function(u){return u;}},
+    {label:"Proxy (codetabs)", wrap:function(u){return "https://api.codetabs.com/v1/proxy/?quest="+encodeURIComponent(u);}},
     {label:"Proxy (allorigins)", wrap:function(u){return "https://api.allorigins.win/raw?url="+encodeURIComponent(u);}},
     {label:"Proxy (corsproxy)", wrap:function(u){return "https://corsproxy.io/?url="+encodeURIComponent(u);}}
   ];
@@ -239,7 +241,7 @@ var App=(function(){
     function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
     function latestMs(){ var m=0; map.forEach(function(_,s){ if(s>m)m=s; }); return m*1000; }
     try{
-      var end=new Date(), start=new Date(); start.setMonth(start.getMonth()-6);
+      var end=new Date(), start=new Date(); start.setMonth(start.getMonth()-MONTHS);
       await pickTransport(); // direkter Weg oder Proxy
       setProg(20,"Lade Börsendaten…");
       // Primär: EIN Request über den gesamten Zeitraum (auch über Proxy) – vermeidet Rate-Limits
@@ -412,7 +414,7 @@ var App=(function(){
     });
     wrap.appendChild(svg);
     document.getElementById("profinfo").innerHTML=
-      "Mittlerer Tibber-Endpreis je Stunde über 6 Monate – günstigste Stunde <b style='color:"+C.teal+"'>"+
+      "Mittlerer Tibber-Endpreis je Stunde über 3 Monate – günstigste Stunde <b style='color:"+C.teal+"'>"+
       calc.cheap.label+":00 Uhr ("+num(calc.cheap.avg,1)+" ct)</b>, teuerste <b style='color:"+C.red+"'>"+
       calc.dear.label+":00 Uhr ("+num(calc.dear.avg,1)+" ct)</b>. Ideal fürs EV-/Wallbox-Timing.";
   }
@@ -474,7 +476,7 @@ var App=(function(){
     var head="Datum;O ct/kWh;Min ct/kWh;Min Zeit;Max ct/kWh;Max Zeit;Spread ct/kWh\n";
     var body=calc.daily.map(function(d){return [d.dk,num(d.avg,2),num(d.min,2),d.minTime,num(d.max,2),d.maxTime,num(d.spread,2)].join(";");}).join("\n");
     var blob=new Blob([head+body],{type:"text/csv;charset=utf-8"});
-    var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="strompreise_grossgerau_6monate.csv";
+    var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="strompreise_grossgerau_3monate.csv";
     document.body.appendChild(a);a.click();a.remove();
   }
 

@@ -1,6 +1,6 @@
 // Strompreis-Cockpit – Service Worker
 // Cache-Version bei jedem Update erhöhen (v2 -> v3 ...), damit iOS die neuen Dateien lädt.
-const CACHE = "strompreis-v4";
+const CACHE = "strompreis-v5";
 
 const SHELL = [
   "./",
