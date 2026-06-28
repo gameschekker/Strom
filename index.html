@@ -178,6 +178,8 @@ var fTime=new Intl.DateTimeFormat("de-DE",{timeZone:"Europe/Berlin",hour:"2-digi
 var fHour=new Intl.DateTimeFormat("en-GB",{timeZone:"Europe/Berlin",hour:"2-digit",hour12:false});
 var fLabel=new Intl.DateTimeFormat("de-DE",{timeZone:"Europe/Berlin",day:"2-digit",month:"2-digit"});
 var fLong=new Intl.DateTimeFormat("de-DE",{timeZone:"Europe/Berlin",weekday:"short",day:"2-digit",month:"2-digit",year:"numeric"});
+var fHK=new Intl.DateTimeFormat("en-GB",{timeZone:"Europe/Berlin",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",hour12:false});
+function hourKeyOf(ms){ var p={}; fHK.formatToParts(new Date(ms)).forEach(function(x){p[x.type]=x.value;}); var h=p.hour==="24"?"00":p.hour; return p.year+"-"+p.month+"-"+p.day+" "+h; }
 
 function num(v,d){ if(d==null)d=1; return (v==null||isNaN(v))?"–":v.toLocaleString("de-DE",{minimumFractionDigits:d,maximumFractionDigits:d}); }
 function iso(dt){return dt.getFullYear()+"-"+String(dt.getMonth()+1).padStart(2,"0")+"-"+String(dt.getDate()).padStart(2,"0");}
@@ -208,15 +210,37 @@ function buildChunks(){
 var App=(function(){
   var raw=null, fees=Object.assign({},DEFAULTS), mode="end", calc=null, failed=0;
   var tab="overview";
-  var CMP_DEFAULTS={annual:4000, profile:"flach", smart:0, smartHours:4, fixArbeit:30.0, fixGrund:12.0};
-  var cmp=Object.assign({},CMP_DEFAULTS), LS2="gg_strom_cmp_v1";
-  var CFIELDS=[
+  var CMP_DEFAULTS={
+    source:"modell", profile:"flach", annual:4000, smart:0, smartHours:4,
+    fixArbeit:30.0, fixGrund:12.0, feedin:8.0,
+    usePV:"ja", kwp:3.6, yield:950, batt:7.0,
+    haURL:"", haToken:"",
+    haImport:"", haExport:"",
+    haPV:"", haCons:""
+  };
+  var cmp=Object.assign({},CMP_DEFAULTS), LS2="gg_strom_cmp_v3";
+  var CONTRACT=[
+    ["fixArbeit","Fester Arbeitspreis","ct/kWh","0.01"],
+    ["fixGrund","Fester Grundpreis","€/Monat","0.01"],
+    ["feedin","Einspeisevergütung","ct/kWh","0.01"]
+  ];
+  var MODELF=[
     ["annual","Jahresverbrauch","kWh","1"],
     ["smart","Smart-Laden (EV)","kWh/Monat","1"],
-    ["smartHours","günstigste Std./Tag","h","1"],
-    ["fixArbeit","Fester Arbeitspreis","ct/kWh","0.01"],
-    ["fixGrund","Fester Grundpreis","€/Monat","0.01"]
+    ["smartHours","günstigste Std./Tag","h","1"]
   ];
+  var PVFIELDS=[
+    ["kwp","PV-Größe","kWp","0.1"],
+    ["batt","Speicher","kWh","0.1"],
+    ["yield","Spez. Ertrag","kWh/kWp·a","10"]
+  ];
+  var HATEXT=[
+    ["haImport","Netzbezug-Sensor","ID","sensor.netz_bezug"],
+    ["haExport","Einspeisung-Sensor","ID","sensor.netz_einspeisung"],
+    ["haPV","PV-Erzeugung (optional)","ID","sensor.pv_erzeugung"],
+    ["haCons","Hausverbrauch (optional)","ID","sensor.hausverbrauch"]
+  ];
+  var haData=null, haStatus="";
   // vereinfachtes H0-Haushaltsprofil: relative Stundengewichte (Nacht niedrig, Morgen-/Abendspitze)
   var H0=[0.55,0.50,0.48,0.47,0.48,0.55,0.75,1.05,1.15,1.10,1.05,1.05,1.08,1.02,0.98,0.98,1.05,1.25,1.45,1.50,1.35,1.10,0.85,0.65];
 
@@ -499,69 +523,183 @@ var App=(function(){
   function loadCmp(){ try{var s=localStorage.getItem(LS2); if(s)cmp=Object.assign({},CMP_DEFAULTS,JSON.parse(s));}catch(e){} }
   function saveCmp(){ try{localStorage.setItem(LS2,JSON.stringify(cmp));}catch(e){} }
 
-  function computeCompare(){
-    if(!raw) return null;
+  function toMs(t){ return (typeof t==="number") ? (t<2e10? t*1000 : t) : Date.parse(t); }
+
+  function haConnect(){
+    var base=(cmp.haURL||"").trim().replace(/\/+$/,"");
+    if(!base || !cmp.haToken){ haStatus="Bitte HA-URL und Token angeben."; renderCmpOut(); return; }
+    if(!cmp.haImport || !cmp.haImport.trim()){ haStatus="Netzbezug-Sensor fehlt."; renderCmpOut(); return; }
+    var wsUrl=base.replace(/^http/i,"ws")+"/api/websocket";
+    var ids=[]; [cmp.haImport,cmp.haExport,cmp.haPV,cmp.haCons].forEach(function(x){ if(x&&x.trim())ids.push(x.trim()); });
+    var end=new Date(), start=new Date(); start.setMonth(start.getMonth()-MONTHS);
+    haStatus="Verbinde mit Home Assistant…"; renderCmpOut();
+    var ws; try{ ws=new WebSocket(wsUrl); }catch(e){ haStatus="WebSocket-Fehler: "+e.message; renderCmpOut(); return; }
+    var done=false;
+    var timer=setTimeout(function(){ if(!done){done=true; try{ws.close();}catch(e){} haStatus="Zeitüberschreitung – URL/Token/Netz prüfen."; renderCmpOut();} },30000);
+    ws.onerror=function(){ if(!done){done=true; clearTimeout(timer); haStatus="Verbindung fehlgeschlagen – ist die Nabu-Casa-URL korrekt und erreichbar?"; renderCmpOut();} };
+    ws.onmessage=function(ev){
+      var m; try{m=JSON.parse(ev.data);}catch(e){return;}
+      if(m.type==="auth_required"){ ws.send(JSON.stringify({type:"auth",access_token:cmp.haToken.trim()})); }
+      else if(m.type==="auth_invalid"){ done=true; clearTimeout(timer); try{ws.close();}catch(e){} haStatus="Token ungültig."; renderCmpOut(); }
+      else if(m.type==="auth_ok"){
+        ws.send(JSON.stringify({id:1,type:"recorder/statistics_during_period",
+          start_time:start.toISOString(), end_time:end.toISOString(), statistic_ids:ids, period:"hour", types:["change"]}));
+      } else if(m.type==="result" && m.id===1){
+        done=true; clearTimeout(timer); try{ws.close();}catch(e){}
+        if(!m.success){ haStatus="HA-Fehler: "+((m.error&&m.error.message)||"unbekannt"); renderCmpOut(); return; }
+        var res=m.result||{};
+        function mp(id){ var mm=new Map(); var arr=(id&&res[id])?res[id]:[]; arr.forEach(function(r){ mm.set(hourKeyOf(toMs(r.start)), (r.change==null?0:+r.change)); }); return mm; }
+        haData={ imp:mp(cmp.haImport), exp:mp(cmp.haExport), pv:mp(cmp.haPV), cons:mp(cmp.haCons),
+                 hasExp:!!(cmp.haExport&&cmp.haExport.trim()), hasPV:!!(cmp.haPV&&cmp.haPV.trim()), hasCons:!!(cmp.haCons&&cmp.haCons.trim()) };
+        var n=haData.imp.size;
+        haStatus= n? ("Verbunden ✓ "+n+" Stunden geladen.") : "Verbunden, aber keine Werte für den Netzbezug-Sensor (ID prüfen).";
+        renderCmpOut();
+      }
+    };
+  }
+
+  function computeFromHA(){
+    if(!haData) return {source:"ha", numDays:0, series:[], months:[], usePV:false, hasCons:false, hasExp:false,
+      totalImport:0,totalExport:0,totalPV:0,totalLoad:0,selfPV:0,autarky:0,eigenquote:0,feedInEur:0,
+      dynEnergyEur:0,tibGrundTotal:0,dynTotal:0,fixEnergyEur:0,fixGrundTotal:0,fixTotal:0,beArbeit:0,diff:0};
     var addNet=(+fees.netzentgelt)+(+fees.stromsteuer)+(+fees.umlagen)+(+fees.konzession)+(+fees.aufschlag);
     var vat=1+(+fees.mwst)/100;
+    var hp=new Map(), gsum=0,gn=0;
+    for(var i=0;i<raw.sec.length;i++){ var hk=hourKeyOf(raw.sec[i]*1000); var e=(raw.spot[i]+addNet)*vat; var o=hp.get(hk); if(!o){o={s:0,n:0};hp.set(hk,o);} o.s+=e;o.n++; gsum+=e;gn++; }
+    var gMean= gn? gsum/gn : 0;
+    var fixArb=(+cmp.fixArbeit), tibGrund=(+fees.grundpreis), fixGrund=(+cmp.fixGrund), feedin=(+cmp.feedin);
+    var days=new Map(), order=[];
+    function dayRec(hk){ var dk=hk.substring(0,10); var r=days.get(dk); if(!r){ var Y=+dk.substring(0,4),M=+dk.substring(5,7),D=+dk.substring(8,10); r={dk:dk,ms0:new Date(Y,M-1,D,12).getTime(),imp:0,exp:0,pv:0,cons:0,dynC:0}; days.set(dk,r); order.push(r);} return r; }
+    haData.imp.forEach(function(kwh,hk){ var r=dayRec(hk); var o=hp.get(hk); var price=o?o.s/o.n:gMean; r.imp+=kwh; r.dynC+=kwh*price; });
+    if(haData.hasExp) haData.exp.forEach(function(kwh,hk){ dayRec(hk).exp+=kwh; });
+    if(haData.hasPV) haData.pv.forEach(function(kwh,hk){ dayRec(hk).pv+=kwh; });
+    if(haData.hasCons) haData.cons.forEach(function(kwh,hk){ dayRec(hk).cons+=kwh; });
+    order.sort(function(a,b){return a.ms0-b.ms0;});
+    var numDays=order.length, periodMonths=numDays/30.4375;
+    var dailyTibGrund=tibGrund*12/365, dailyFixGrund=fixGrund*12/365;
+    var dynCents=0,totImp=0,totExp=0,totPV=0,totCons=0, cumDyn=0,cumFix=0, series=[];
+    order.forEach(function(r){
+      dynCents+=r.dynC; totImp+=r.imp; totExp+=r.exp; totPV+=r.pv; totCons+=r.cons;
+      var dExp=r.exp*feedin/100, dDyn=r.dynC/100+dailyTibGrund-dExp, dFix=fixArb*r.imp/100+dailyFixGrund-dExp;
+      cumDyn+=dDyn; cumFix+=dFix;
+      series.push({ms0:r.ms0,label:fLabel.format(new Date(r.ms0)),long:fLong.format(new Date(r.ms0)),dyn:cumDyn,fix:cumFix,dDyn:dDyn,dFix:dFix,dKWh:r.imp});
+    });
+    var months=new Map(), morder=[]; var mfm=new Intl.DateTimeFormat("de-DE",{timeZone:"Europe/Berlin",month:"long",year:"numeric"});
+    series.forEach(function(s){ var mk=mfm.format(new Date(s.ms0)); var m=months.get(mk); if(!m){m={label:mk,kwh:0,dyn:0,fix:0};months.set(mk,m);morder.push(m);} m.kwh+=s.dKWh;m.dyn+=s.dDyn;m.fix+=s.dFix; });
+    var selfPV= haData.hasPV? Math.max(0,totPV-totExp) : 0;
+    var totalLoad= haData.hasCons? totCons : (totImp+selfPV);
+    var feedInEur=totExp*feedin/100, dynEnergyEur=dynCents/100;
+    var dynTotal=dynEnergyEur+tibGrund*periodMonths-feedInEur, fixEnergyEur=fixArb*totImp/100, fixTotal=fixEnergyEur+fixGrund*periodMonths-feedInEur;
+    return {
+      source:"ha", usePV:haData.hasPV, hasCons:haData.hasCons, hasExp:haData.hasExp,
+      numDays:numDays, periodMonths:periodMonths,
+      totalImport:totImp, totalExport:totExp, totalPV:totPV, totalLoad:totalLoad,
+      selfPV:selfPV, autarky: totalLoad?(totalLoad-totImp)/totalLoad:0, eigenquote: totPV? selfPV/totPV:0,
+      feedInEur:feedInEur, dynEnergyEur:dynEnergyEur, tibGrundTotal:tibGrund*periodMonths, dynTotal:dynTotal,
+      fixEnergyEur:fixEnergyEur, fixGrundTotal:fixGrund*periodMonths, fixTotal:fixTotal,
+      beArbeit: totImp? dynCents/totImp:0, diff: fixTotal-dynTotal, series:series, months:morder
+    };
+  }
+
+  function computeCompare(){
+    if(!raw) return null;
+    if(cmp.source==="ha") return computeFromHA();
+    var addNet=(+fees.netzentgelt)+(+fees.stromsteuer)+(+fees.umlagen)+(+fees.konzession)+(+fees.aufschlag);
+    var vat=1+(+fees.mwst)/100;
+    var useH0=(cmp.profile==="h0"), usePV=(cmp.usePV==="ja");
+    var kwp=Math.max(0,+cmp.kwp), spYield=Math.max(0,+cmp.yield), batt=Math.max(0,+cmp.batt), feedin=Math.max(0,+cmp.feedin);
+    var annualPV= usePV ? kwp*spYield : 0, ETA=0.92;
+    // PV-Saison (Anteil am Jahresertrag) + Tageslichtfenster (lokale Uhrzeit, inkl. Sommerzeit grob)
+    var share=[2.5,4.5,8.0,11.0,13.5,13.5,13.5,12.0,9.0,6.0,3.5,2.0];
+    var ssum=share.reduce(function(a,b){return a+b;},0); share=share.map(function(x){return x/ssum;});
+    var sr=[8.3,7.7,6.8,6.7,5.8,5.3,5.6,6.3,7.1,7.8,7.6,8.2];
+    var ss=[16.5,17.4,18.3,20.2,21.0,21.5,21.3,20.5,19.4,18.3,16.6,16.2];
+    var mfMY=new Intl.DateTimeFormat("en-US",{timeZone:"Europe/Berlin",month:"numeric",year:"numeric"});
+
     var days=new Map(), order=[];
     for(var i=0;i<raw.sec.length;i++){
       var ms=raw.sec[i]*1000, dt=new Date(ms);
       var dk=fDay.format(dt), h=parseInt(fHour.format(dt),10);
+      var p=mfMY.format(dt).split("/"); var mo=parseInt(p[0],10)-1, yr=parseInt(p[1],10);
       var end=(raw.spot[i]+addNet)*vat;
-      var rec=days.get(dk); if(!rec){rec={dk:dk,ms0:ms,items:[]};days.set(dk,rec);order.push(rec);}
+      var rec=days.get(dk); if(!rec){rec={dk:dk,ms0:ms,mo:mo,yr:yr,items:[]};days.set(dk,rec);order.push(rec);}
       rec.items.push({end:end,h:h});
     }
-    var numDays=order.length;
+    var numDays=order.length, periodMonths=numDays/30.4375;
     var periodKWh=(+cmp.annual)*numDays/365;
-    var periodMonths=numDays/30.4375;
-    var periodSmart=Math.min(periodKWh, Math.max(0,(+cmp.smart))*(numDays/30.4375));
+    var periodSmart=Math.min(periodKWh, Math.max(0,(+cmp.smart))*periodMonths);
     var baseKWh=Math.max(0, periodKWh-periodSmart);
     var dailySmart= numDays? periodSmart/numDays : 0;
-    var useH0=(cmp.profile==="h0");
-    var totW=0;
-    order.forEach(function(d){ d.items.forEach(function(it){ totW+=(useH0?H0[it.h]:1); }); });
+    var totW=0; order.forEach(function(d){ d.items.forEach(function(it){ totW+=(useH0?H0[it.h]:1); }); });
 
-    var dynCents=0, totalKWh=0, fixArb=(+cmp.fixArbeit), tibGrund=(+fees.grundpreis), fixGrund=(+cmp.fixGrund);
+    var fixArb=(+cmp.fixArbeit), tibGrund=(+fees.grundpreis), fixGrund=(+cmp.fixGrund);
     var dailyTibGrund=tibGrund*12/365, dailyFixGrund=fixGrund*12/365;
-    var series=[], cumDyn=0, cumFix=0;
+    var dynCents=0, totImport=0, totExport=0, totPV=0, totLoad=0;
+    var series=[], cumDyn=0, cumFix=0, soc=0;
 
     order.forEach(function(d){
-      var dayKWh=0, dayDynCents=0;
+      var dim=new Date(d.yr,d.mo+1,0).getDate();
+      var dailyPV=annualPV*share[d.mo]/dim, srh=sr[d.mo], ssh=ss[d.mo], span=ssh-srh;
+      var pvW=[], pvWsum=0;
       d.items.forEach(function(it){
-        var w=(useH0?H0[it.h]:1);
-        var kwh= totW? baseKWh*(w/totW) : 0;
-        dayKWh+=kwh; dayDynCents+=it.end*kwh;
+        var hm=it.h+0.5, w=0;
+        if(span>0 && hm>srh && hm<ssh){ w=Math.sin(Math.PI*(hm-srh)/span); if(w<0)w=0; }
+        pvW.push(w); pvWsum+=w;
       });
+      d.items.forEach(function(it,idx){
+        it.base= totW? baseKWh*((useH0?H0[it.h]:1)/totW) : 0;
+        it.pv= (pvWsum>0)? dailyPV*(pvW[idx]/pvWsum) : 0;
+        it.ev=0;
+      });
+      // EV-Optimierung: erst PV-Überschuss, Rest in die günstigsten Netzstunden
       if(dailySmart>0 && d.items.length){
-        var perHour=d.items.length/24;
-        var nSmart=Math.min(d.items.length, Math.max(1, Math.round((+cmp.smartHours)*perHour)));
-        var sorted=d.items.slice().sort(function(a,b){return a.end-b.end;});
-        var add=dailySmart/nSmart;
-        for(var k=0;k<nSmart;k++){ dayKWh+=add; dayDynCents+=sorted[k].end*add; }
+        var surplusTot=0; d.items.forEach(function(it){ var s=it.pv-it.base; if(s>0)surplusTot+=s; });
+        var evPV=Math.min(dailySmart, surplusTot);
+        if(evPV>0 && surplusTot>0){ d.items.forEach(function(it){ var s=it.pv-it.base; if(s>0)it.ev+=evPV*(s/surplusTot); }); }
+        var evGrid=dailySmart-evPV;
+        if(evGrid>0){
+          var perHour=d.items.length/24, nSmart=Math.min(d.items.length, Math.max(1, Math.round((+cmp.smartHours)*perHour)));
+          var byPrice=d.items.slice().sort(function(a,b){return a.end-b.end;}), add=evGrid/nSmart;
+          for(var k=0;k<nSmart;k++){ byPrice[k].ev+=add; }
+        }
       }
-      dynCents+=dayDynCents; totalKWh+=dayKWh;
-      var dDyn=dayDynCents/100+dailyTibGrund, dFix=(fixArb*dayKWh)/100+dailyFixGrund;
+      var dayImp=0, dayExp=0, dayPV=0, dayLoad=0, dayDynCents=0;
+      d.items.forEach(function(it){
+        var load=it.base+it.ev, net=it.pv-load, imp=0, exp=0;
+        if(usePV){
+          if(net>=0){ var store=Math.min(net, batt-soc); soc+=store; exp=net-store; }
+          else{ var def=-net, draw=Math.min(soc, def/ETA); soc-=draw; imp=def-draw*ETA; }
+        }else{ imp=load; }
+        dayImp+=imp; dayExp+=exp; dayPV+=it.pv; dayLoad+=load; dayDynCents+=it.end*imp;
+      });
+      dynCents+=dayDynCents; totImport+=dayImp; totExport+=dayExp; totPV+=dayPV; totLoad+=dayLoad;
+      var dExp=dayExp*feedin/100;
+      var dDyn=dayDynCents/100+dailyTibGrund-dExp, dFix=fixArb*dayImp/100+dailyFixGrund-dExp;
       cumDyn+=dDyn; cumFix+=dFix;
       series.push({ms0:d.ms0,label:fLabel.format(new Date(d.ms0)),long:fLong.format(new Date(d.ms0)),
-        dyn:cumDyn,fix:cumFix,dDyn:dDyn,dFix:dFix,dKWh:dayKWh});
+        dyn:cumDyn,fix:cumFix,dDyn:dDyn,dFix:dFix,dKWh:dayImp});
     });
 
     var months=new Map(), morder=[];
-    var mf=new Intl.DateTimeFormat("de-DE",{timeZone:"Europe/Berlin",month:"long",year:"numeric"});
+    var mfm=new Intl.DateTimeFormat("de-DE",{timeZone:"Europe/Berlin",month:"long",year:"numeric"});
     series.forEach(function(s){
-      var mk=mf.format(new Date(s.ms0));
+      var mk=mfm.format(new Date(s.ms0));
       var m=months.get(mk); if(!m){m={label:mk,kwh:0,dyn:0,fix:0};months.set(mk,m);morder.push(m);}
       m.kwh+=s.dKWh; m.dyn+=s.dDyn; m.fix+=s.dFix;
     });
 
-    var dynEnergyEur=dynCents/100;
+    var feedInEur=totExport*feedin/100, dynEnergyEur=dynCents/100;
+    var dynTotal=dynEnergyEur+tibGrund*periodMonths-feedInEur;
+    var fixEnergyEur=fixArb*totImport/100, fixTotal=fixEnergyEur+fixGrund*periodMonths-feedInEur;
     return {
-      numDays:numDays, periodKWh:totalKWh, periodMonths:periodMonths,
-      dynEnergyEur:dynEnergyEur, tibGrundTotal:tibGrund*periodMonths, dynTotal:dynEnergyEur+tibGrund*periodMonths,
-      fixEnergyEur:fixArb*totalKWh/100, fixGrundTotal:fixGrund*periodMonths, fixTotal:fixArb*totalKWh/100+fixGrund*periodMonths,
-      beArbeit: totalKWh? dynCents/totalKWh : 0,
-      diff: (fixArb*totalKWh/100+fixGrund*periodMonths) - (dynEnergyEur+tibGrund*periodMonths),
-      series:series, months:morder
+      numDays:numDays, periodMonths:periodMonths, usePV:usePV,
+      totalLoad:totLoad, totalPV:totPV, totalImport:totImport, totalExport:totExport,
+      selfPV:totPV-totExport, autarky: totLoad?(totLoad-totImport)/totLoad:0, eigenquote: totPV?(totPV-totExport)/totPV:0,
+      feedInEur:feedInEur,
+      dynEnergyEur:dynEnergyEur, tibGrundTotal:tibGrund*periodMonths, dynTotal:dynTotal,
+      fixEnergyEur:fixEnergyEur, fixGrundTotal:fixGrund*periodMonths, fixTotal:fixTotal,
+      beArbeit: totImport? dynCents/totImport : 0,
+      diff: fixTotal-dynTotal, series:series, months:morder
     };
   }
 
@@ -571,62 +709,112 @@ var App=(function(){
 
   function renderCompare(){
     var el=document.getElementById("tab-compare");
-    var profSel="<label class='fee'><span>Lastprofil</span><div class='selwrap'><select data-c='profile'>"+
-      "<option value='flach'"+(cmp.profile==="flach"?" selected":"")+">Flachlast (konstant)</option>"+
-      "<option value='h0'"+(cmp.profile==="h0"?" selected":"")+">Haushalt (H0)</option>"+
-      "</select></div></label>";
-    var inputs=CFIELDS.map(function(f){
+    var isHA=(cmp.source==="ha");
+    function sel(key,label,items){ return "<label class='fee'><span>"+label+"</span><div class='selwrap'><select data-c='"+key+"'>"+
+      items.map(function(o){return "<option value='"+o[0]+"'"+(cmp[key]===o[0]?" selected":"")+">"+o[1]+"</option>";}).join("")+"</select></div></label>"; }
+    function flds(arr){ return arr.map(function(f){
       return "<label class='fee'><span>"+f[1]+"</span><div class='inp'>"+
         "<input type='number' step='"+f[3]+"' value='"+cmp[f[0]]+"' data-c='"+f[0]+"'>"+
-        "<span class='u'>"+f[2]+"</span></div></label>";
-    }).join("");
+        "<span class='u'>"+f[2]+"</span></div></label>"; }).join(""); }
+    function tfld(key,label,ph,type){ return "<label class='fee' style='grid-column:1/-1'><span>"+label+"</span><div class='inp'>"+
+      "<input type='"+(type||"text")+"' value='"+(cmp[key]||"")+"' data-c='"+key+"' placeholder='"+(ph||"")+"' autocapitalize='off' autocorrect='off' spellcheck='false'></div></label>"; }
+    function tflds(arr){ return arr.map(function(f){
+      return "<label class='fee'><span>"+f[1]+"</span><div class='inp'>"+
+        "<input type='text' value='"+(cmp[f[0]]||"")+"' data-c='"+f[0]+"' placeholder='"+(f[3]||"")+"' autocapitalize='off' autocorrect='off' spellcheck='false'>"+
+        "<span class='u'>"+f[2]+"</span></div></label>"; }).join(""); }
+
+    var srcSel=sel("source","Datenquelle",[["modell","Modell (Schätzung)"],["ha","Home Assistant (real)"]]);
+    var modelPanels = isHA ? "" :
+      ("<div class='panel'>"+
+         "<h2 style='margin-bottom:12px'>Verbrauch &amp; Lastprofil</h2>"+
+         "<div class='grid-fee'>"+sel("profile","Lastprofil",[["flach","Flachlast (konstant)"],["h0","Haushalt (H0)"]])+flds(MODELF)+"</div>"+
+         "<div class='note' id='cmp-note' style='margin-top:12px'></div>"+
+       "</div>"+
+       "<div class='panel'>"+
+         "<h2 style='margin-bottom:12px'>PV &amp; Speicher</h2>"+
+         "<div class='grid-fee'>"+sel("usePV","PV einbeziehen",[["ja","Ja"],["nein","Nein"]])+flds(PVFIELDS)+"</div>"+
+       "</div>");
+    var haPanel = !isHA ? "" :
+      ("<div class='panel'>"+
+         "<h2 style='margin-bottom:12px'>Home-Assistant-Verbindung</h2>"+
+         "<div class='grid-fee'>"+tfld("haURL","HA-URL (Nabu Casa)","https://….ui.nabu.casa")+tfld("haToken","Long-Lived Access Token","Token aus HA-Profil","password")+tflds(HATEXT)+"</div>"+
+         "<div class='row' style='margin-top:12px'><div class='note' id='cmp-hastatus'></div>"+
+         "<button class='btn' onclick=\"App.haConnect()\">Verbinden &amp; Laden</button></div>"+
+         "<div class='note' id='cmp-note' style='margin-top:10px'></div>"+
+       "</div>");
+
     el.innerHTML=
       "<div class='panel'>"+
-        "<div class='row' style='margin-bottom:12px'><h2>Vergleichsparameter</h2>"+
+        "<div class='row' style='margin-bottom:12px'><h2>Datenquelle &amp; Verträge</h2>"+
         "<button class='btn ghost' onclick=\"App.resetCmp()\">Zurücksetzen</button></div>"+
-        "<div class='grid-fee'>"+profSel+inputs+"</div>"+
-        "<div class='note' id='cmp-note' style='margin-top:12px'></div>"+
+        "<div class='grid-fee'>"+srcSel+flds(CONTRACT)+"</div>"+
       "</div>"+
+      modelPanels + haPanel +
       "<div id='cmp-verdict'></div>"+
+      "<div class='grid-kpi' id='cmp-energy'></div>"+
       "<div class='grid-kpi' id='cmp-kpis'></div>"+
       "<div class='panel'><h2 style='margin-bottom:6px'>Kumulierte Kosten über den Zeitraum</h2>"+
         "<div class='chartwrap' id='cmpwrap'><div class='tip' id='cmptip'></div></div>"+
         "<div class='legend'><span><span class='swatch' style='background:"+C.teal+"'></span>Tibber dynamisch</span>"+
         "<span><span class='swatch' style='background:"+C.amber+"'></span>Festvertrag</span></div></div>"+
       "<div class='panel'><h2 style='margin-bottom:10px'>Monatsvergleich</h2>"+
-        "<div class='tablewrap'><table><thead><tr><th class='l'>Monat</th><th>kWh</th><th>Tibber €</th><th>Fest €</th><th>Diff €</th></tr></thead>"+
+        "<div class='tablewrap'><table><thead><tr><th class='l'>Monat</th><th>Netz-kWh</th><th>Tibber €</th><th>Fest €</th><th>Diff €</th></tr></thead>"+
         "<tbody id='cmp-mtbody'></tbody></table></div></div>"+
-      "<p class='note'>Kostenvergleich auf Basis des realen Börsenverlaufs. Der Verbrauch wird nach gewähltem Lastprofil über die Intervalle verteilt; "+
-        "Smart-Laden legt den EV-Anteil in die täglich günstigsten Stunden. Fester und dynamischer Preis sind beide Brutto-Arbeitspreise (inkl. Steuern, Abgaben, Netz). "+
-        "Werte werden lokal gespeichert.</p>";
+      "<p class='note'>"+ (isHA
+        ? "Reale Stundenwerte aus Home Assistant (recorder-Statistik, period=hour). Abgerechnet wird dein tatsächlicher Netzbezug zu den jeweiligen Börsenpreisen (dynamisch) bzw. zum festen Arbeitspreis – PV, Speicher und Auto sind darin bereits enthalten. URL &amp; Token bleiben lokal auf dem Gerät."
+        : "Vereinfachtes Modell auf Basis des realen Börsenverlaufs: PV-Ertrag saisonal über einen Tagesbogen verteilt, Eigenverbrauch zuerst Haushalt dann Speicher, Auto lädt bevorzugt PV-Überschuss, Rest in die günstigsten Netzstunden. Der Einspeiseerlös kürzt sich in der Differenz heraus. Für exakte Werte oben die Datenquelle auf Home Assistant umschalten.") +"</p>";
+
     Array.from(el.querySelectorAll("[data-c]")).forEach(function(inp){
       var ev=(inp.tagName==="SELECT")?"change":"input";
       inp.addEventListener(ev,function(){
         var k=inp.dataset.c;
-        cmp[k]=(k==="profile")?inp.value:(inp.value===""?0:parseFloat(inp.value));
-        saveCmp(); renderCmpOut();
+        cmp[k]=(inp.tagName==="SELECT"||inp.type==="text"||inp.type==="password")?inp.value:(inp.value===""?0:parseFloat(inp.value));
+        saveCmp();
+        if(k==="source") renderCompare(); else renderCmpOut();
       });
     });
     renderCmpOut();
   }
 
   function renderCmpOut(){
+    var st=document.getElementById("cmp-hastatus"); if(st) st.textContent=haStatus;
     var r=computeCompare(); if(!r) return;
+    var noteEl=document.getElementById("cmp-note");
+    if(r.source==="ha" && r.numDays===0){
+      document.getElementById("cmp-verdict").innerHTML=
+        "<div class='verdict' style='border-color:"+C.blue+";margin-bottom:14px'>Trage oben HA-URL, Token und die Sensoren ein und tippe auf <b>Verbinden &amp; Laden</b>, um deine realen Netzwerte für den Zeitraum zu laden.</div>";
+      document.getElementById("cmp-energy").innerHTML="";
+      document.getElementById("cmp-kpis").innerHTML="";
+      document.getElementById("cmp-mtbody").innerHTML="";
+      var w0=document.getElementById("cmpwrap"); if(w0) Array.from(w0.querySelectorAll("svg")).forEach(function(s){s.remove();});
+      if(noteEl) noteEl.textContent="";
+      return;
+    }
     var saves=r.diff>=0, win=saves?C.teal:C.amber;
-    document.getElementById("cmp-note").innerHTML=
-      "Annahme: realer Börsenverlauf der letzten "+r.numDays+" Tage, "+(cmp.profile==="h0"?"Haushaltsprofil (H0)":"Flachlast")+". "+
-      "Smart-Laden: "+num(cmp.smart,0)+" kWh/Monat in die günstigsten "+num(cmp.smartHours,0)+" h/Tag. "+
-      "Tibber-Grundpreis "+num(fees.grundpreis,2)+" €/Monat (aus Tab 1).";
+    if(noteEl){
+      noteEl.innerHTML = (r.source==="ha")
+        ? ("Sensoren: Netzbezug "+(cmp.haImport||"–")+(cmp.haExport?(", Einspeisung "+cmp.haExport):"")+(cmp.haPV?(", PV "+cmp.haPV):"")+".")
+        : ( r.usePV
+            ? ("PV "+num(+cmp.kwp,1)+" kWp + "+num(+cmp.batt,1)+" kWh Speicher, "+num(+cmp.yield,0)+" kWh/kWp·a. EV "+num(cmp.smart,0)+" kWh/Monat (PV-Vorrang, Rest günstigste "+num(cmp.smartHours,0)+" h/Tag).")
+            : ("Ohne PV. EV "+num(cmp.smart,0)+" kWh/Monat in die günstigsten "+num(cmp.smartHours,0)+" h/Tag.") );
+    }
+    var verbrauchTxt = r.totalLoad>0 ? (" von "+num(r.totalLoad,0)+" kWh Verbrauch"+(r.source==="ha"&&!r.hasCons?" (geschätzt)":"")) : "";
     document.getElementById("cmp-verdict").innerHTML=
       "<div class='verdict' style='background:"+(saves?"rgba(45,212,191,.10)":"rgba(245,185,66,.10)")+";border-color:"+win+";margin-bottom:14px'>"+
         "<b style='color:"+win+"'>"+(saves?"Tibber dynamisch wäre günstiger":"Der Festvertrag wäre günstiger")+"</b> — Differenz "+
-        "<b class='mono'>"+num(Math.abs(r.diff),2)+" €</b> über "+r.numDays+" Tage (Verbrauch "+num(r.periodKWh,0)+" kWh). "+
-        "Aufs Jahr hochgerechnet ≈ <b class='mono'>"+num(Math.abs(r.diff)*365/r.numDays,0)+" €</b>.</div>";
+        "<b class='mono'>"+num(Math.abs(r.diff),2)+" €</b> über "+r.numDays+" Tage. Netzbezug <b class='mono'>"+num(r.totalImport,0)+" kWh</b>"+verbrauchTxt+". "+
+        "Aufs Jahr hochgerechnet ≈ <b class='mono'>"+num(Math.abs(r.diff)*365/Math.max(1,r.numDays),0)+" €</b>.</div>";
+    var ec="";
+    if(r.totalPV>0) ec+=kpiCard("PV-Ertrag",num(r.totalPV,0)+" kWh",(r.source==="ha"?"gemessen":"im Zeitraum"),C.amber);
+    if(r.totalPV>0) ec+=kpiCard("Eigenverbrauch",num(r.eigenquote*100,0)+" %",num(r.selfPV,0)+" kWh selbst genutzt",C.teal);
+    if(r.totalPV>0||r.hasCons) ec+=kpiCard("Autarkie",num(r.autarky*100,0)+" %",(r.source==="ha"&&!r.hasCons?"geschätzt":"aus PV/Speicher"),C.teal);
+    if(r.totalExport>0||r.hasExp) ec+=kpiCard("Einspeisung",num(r.totalExport,0)+" kWh","Erlös "+num(r.feedInEur,2)+" €",C.blue);
+    document.getElementById("cmp-energy").innerHTML=ec;
     document.getElementById("cmp-kpis").innerHTML=
-      kpiCard("Tibber dynamisch",num(r.dynTotal,2)+" €","Energie "+num(r.dynEnergyEur,2)+" + Grund "+num(r.tibGrundTotal,2),C.teal)+
-      kpiCard("Festvertrag",num(r.fixTotal,2)+" €","Energie "+num(r.fixEnergyEur,2)+" + Grund "+num(r.fixGrundTotal,2),C.amber)+
+      kpiCard("Tibber dynamisch",num(r.dynTotal,2)+" €","Netz "+num(r.dynEnergyEur,2)+" + Grund "+num(r.tibGrundTotal,2)+(r.feedInEur?(" − Einsp. "+num(r.feedInEur,2)):""),C.teal)+
+      kpiCard("Festvertrag",num(r.fixTotal,2)+" €","Netz "+num(r.fixEnergyEur,2)+" + Grund "+num(r.fixGrundTotal,2)+(r.feedInEur?(" − Einsp. "+num(r.feedInEur,2)):""),C.amber)+
       kpiCard("Differenz",(r.diff>=0?"−":"+")+num(Math.abs(r.diff),2)+" €",(r.diff>=0?"Ersparnis mit Tibber":"Mehrkosten mit Tibber"),win)+
-      kpiCard("Break-even Arbeitspreis",num(r.beArbeit,2)+" ct","fester AP darüber ⇒ Tibber lohnt",C.blue);
+      kpiCard("Break-even Arbeitspreis",num(r.beArbeit,2)+" ct","Ø-Preis deines Netzbezugs",C.blue);
     document.getElementById("cmp-mtbody").innerHTML=r.months.map(function(m){
       var d=m.fix-m.dyn;
       return "<tr><td class='l'>"+m.label+"</td><td>"+num(m.kwh,0)+"</td>"+
@@ -701,7 +889,7 @@ var App=(function(){
 
   loadFees(); loadCmp();
   window.addEventListener("resize",function(){if(calc){renderBand();renderProfile(); if(tab==="compare"){var rc=computeCompare(); if(rc)renderCmpChart(rc);}}});
-  return {load:load,setMode:setMode,reset:reset,csv:csv,setTab:setTab,resetCmp:resetCmp};
+  return {load:load,setMode:setMode,reset:reset,csv:csv,setTab:setTab,resetCmp:resetCmp,haConnect:haConnect};
 })();
 if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('sw.js').catch(function(){});});}
 App.load();
