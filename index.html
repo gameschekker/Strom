@@ -526,6 +526,8 @@ var App=(function(){
 
   function toMs(t){ return (typeof t==="number") ? (t<2e10? t*1000 : t) : Date.parse(t); }
 
+  function unitFactor(u){ if(!u) return 1; var s=(""+u).trim().toLowerCase(); if(s==="wh")return 0.001; if(s==="mwh")return 1000; if(s==="gwh")return 1e6; return 1; }
+
   function haConnect(){
     var base=(cmp.haURL||"").trim().replace(/\/+$/,"");
     if(!base || !cmp.haToken){ haStatus="Bitte HA-URL und Token angeben."; renderCmpOut(); return; }
@@ -535,7 +537,7 @@ var App=(function(){
     var end=new Date(), start=new Date(); start.setMonth(start.getMonth()-MONTHS);
     haStatus="Verbinde mit Home Assistant…"; renderCmpOut();
     var ws; try{ ws=new WebSocket(wsUrl); }catch(e){ haStatus="WebSocket-Fehler: "+e.message; renderCmpOut(); return; }
-    var done=false;
+    var done=false, units={};
     var timer=setTimeout(function(){ if(!done){done=true; try{ws.close();}catch(e){} haStatus="Zeitüberschreitung – URL/Token/Netz prüfen."; renderCmpOut();} },30000);
     ws.onerror=function(){ if(!done){done=true; clearTimeout(timer); haStatus="Verbindung fehlgeschlagen – ist die Nabu-Casa-URL korrekt und erreichbar?"; renderCmpOut();} };
     ws.onmessage=function(ev){
@@ -543,17 +545,22 @@ var App=(function(){
       if(m.type==="auth_required"){ ws.send(JSON.stringify({type:"auth",access_token:cmp.haToken.trim()})); }
       else if(m.type==="auth_invalid"){ done=true; clearTimeout(timer); try{ws.close();}catch(e){} haStatus="Token ungültig."; renderCmpOut(); }
       else if(m.type==="auth_ok"){
-        ws.send(JSON.stringify({id:1,type:"recorder/statistics_during_period",
-          start_time:start.toISOString(), end_time:end.toISOString(), statistic_ids:ids, period:"hour", types:["change"]}));
+        ws.send(JSON.stringify({id:1,type:"recorder/list_statistic_ids"}));
       } else if(m.type==="result" && m.id===1){
+        if(m.success && m.result){ m.result.forEach(function(it){ if(it&&it.statistic_id) units[it.statistic_id]=it.unit_of_measurement||it.statistics_unit_of_measurement||it.display_unit_of_measurement; }); }
+        ws.send(JSON.stringify({id:2,type:"recorder/statistics_during_period",
+          start_time:start.toISOString(), end_time:end.toISOString(), statistic_ids:ids, period:"hour", types:["change"]}));
+      } else if(m.type==="result" && m.id===2){
         done=true; clearTimeout(timer); try{ws.close();}catch(e){}
         if(!m.success){ haStatus="HA-Fehler: "+((m.error&&m.error.message)||"unbekannt"); renderCmpOut(); return; }
         var res=m.result||{};
-        function mp(id){ var mm=new Map(); var arr=(id&&res[id])?res[id]:[]; arr.forEach(function(r){ mm.set(hourKeyOf(toMs(r.start)), (r.change==null?0:+r.change)); }); return mm; }
+        function mp(id){ var mm=new Map(); if(!id) return mm; var f=unitFactor(units[id]); var arr=res[id]||[]; arr.forEach(function(r){ mm.set(hourKeyOf(toMs(r.start)), (r.change==null?0:(+r.change)*f)); }); return mm; }
         haData={ imp:mp(cmp.haImport), exp:mp(cmp.haExport), pv:mp(cmp.haPV), cons:mp(cmp.haCons),
-                 hasExp:!!(cmp.haExport&&cmp.haExport.trim()), hasPV:!!(cmp.haPV&&cmp.haPV.trim()), hasCons:!!(cmp.haCons&&cmp.haCons.trim()) };
+                 hasExp:!!(cmp.haExport&&cmp.haExport.trim()), hasPV:!!(cmp.haPV&&cmp.haPV.trim()), hasCons:!!(cmp.haCons&&cmp.haCons.trim()), units:units };
+        function ud(id){ return id? (units[id]?units[id]:"?") : ""; }
+        haData.unitInfo="Einheiten: Netzbezug "+ud(cmp.haImport)+(cmp.haExport?(", Einspeisung "+ud(cmp.haExport)):"")+(cmp.haPV?(", PV "+ud(cmp.haPV)):"")+" → kWh.";
         var n=haData.imp.size;
-        haStatus= n? ("Verbunden ✓ "+n+" Stunden geladen.") : "Verbunden, aber keine Werte für den Netzbezug-Sensor (ID prüfen).";
+        haStatus= n? ("Verbunden ✓ "+n+" Stunden geladen. "+haData.unitInfo) : "Verbunden, aber keine Werte für den Netzbezug-Sensor (ID prüfen).";
         renderCmpOut();
       }
     };
