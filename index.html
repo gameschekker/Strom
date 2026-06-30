@@ -216,7 +216,7 @@ var App=(function(){
     usePV:"ja", kwp:3.6, yield:950, batt:7.0,
     haURL:"", haToken:"",
     haImport:"", haExport:"",
-    haPV:"", haCons:""
+    haPV:"", haCons:"", haCap:50
   };
   var cmp=Object.assign({},CMP_DEFAULTS), LS2="gg_strom_cmp_v3";
   var CONTRACT=[
@@ -240,6 +240,7 @@ var App=(function(){
     ["haPV","PV-Erzeugung (optional)","ID","sensor.pv_erzeugung"],
     ["haCons","Hausverbrauch (optional)","ID","sensor.hausverbrauch"]
   ];
+  var HACAP=[["haCap","Plausibilitätsgrenze","kWh/h","1"]];
   var haData=null, haStatus="";
   // vereinfachtes H0-Haushaltsprofil: relative Stundengewichte (Nacht niedrig, Morgen-/Abendspitze)
   var H0=[0.55,0.50,0.48,0.47,0.48,0.55,0.75,1.05,1.15,1.10,1.05,1.05,1.08,1.02,0.98,0.98,1.05,1.25,1.45,1.50,1.35,1.10,0.85,0.65];
@@ -569,11 +570,13 @@ var App=(function(){
     var gMean= gn? gsum/gn : 0;
     var fixArb=(+cmp.fixArbeit), tibGrund=(+fees.grundpreis), fixGrund=(+cmp.fixGrund), feedin=(+cmp.feedin);
     var days=new Map(), order=[];
+    var CAP=((+cmp.haCap)>0)?(+cmp.haCap):Infinity, diag={skip:0,maxRaw:0};
     function dayRec(hk){ var dk=hk.substring(0,10); var r=days.get(dk); if(!r){ var Y=+dk.substring(0,4),M=+dk.substring(5,7),D=+dk.substring(8,10); r={dk:dk,ms0:new Date(Y,M-1,D,12).getTime(),imp:0,exp:0,pv:0,cons:0,dynC:0}; days.set(dk,r); order.push(r);} return r; }
-    haData.imp.forEach(function(kwh,hk){ var r=dayRec(hk); var o=hp.get(hk); var price=o?o.s/o.n:gMean; r.imp+=kwh; r.dynC+=kwh*price; });
-    if(haData.hasExp) haData.exp.forEach(function(kwh,hk){ dayRec(hk).exp+=kwh; });
-    if(haData.hasPV) haData.pv.forEach(function(kwh,hk){ dayRec(hk).pv+=kwh; });
-    if(haData.hasCons) haData.cons.forEach(function(kwh,hk){ dayRec(hk).cons+=kwh; });
+    function clean(v){ if(v==null) return null; if(v<0||v>CAP) return null; return v; }
+    haData.imp.forEach(function(kwh,hk){ if(kwh!=null&&kwh>diag.maxRaw)diag.maxRaw=kwh; var v=clean(kwh); if(v==null){ if(kwh!=null&&(kwh<0||kwh>CAP))diag.skip++; return; } var r=dayRec(hk); var o=hp.get(hk); var price=o?o.s/o.n:gMean; r.imp+=v; r.dynC+=v*price; });
+    if(haData.hasExp) haData.exp.forEach(function(kwh,hk){ var v=clean(kwh); if(v!=null) dayRec(hk).exp+=v; });
+    if(haData.hasPV) haData.pv.forEach(function(kwh,hk){ var v=clean(kwh); if(v!=null) dayRec(hk).pv+=v; });
+    if(haData.hasCons) haData.cons.forEach(function(kwh,hk){ var v=clean(kwh); if(v!=null) dayRec(hk).cons+=v; });
     order.sort(function(a,b){return a.ms0-b.ms0;});
     var numDays=order.length, periodMonths=numDays/30.4375;
     var dailyTibGrund=tibGrund*12/365, dailyFixGrund=fixGrund*12/365;
@@ -597,7 +600,8 @@ var App=(function(){
       selfPV:selfPV, autarky: totalLoad?(totalLoad-totImp)/totalLoad:0, eigenquote: totPV? selfPV/totPV:0,
       feedInEur:feedInEur, dynEnergyEur:dynEnergyEur, tibGrundTotal:tibGrund*periodMonths, dynTotal:dynTotal,
       fixEnergyEur:fixEnergyEur, fixGrundTotal:fixGrund*periodMonths, fixTotal:fixTotal,
-      beArbeit: totImp? dynCents/totImp:0, diff: fixTotal-dynTotal, series:series, months:morder
+      beArbeit: totImp? dynCents/totImp:0, diff: fixTotal-dynTotal, series:series, months:morder,
+      diagSkip:diag.skip, diagMax:diag.maxRaw, cap:CAP
     };
   }
 
@@ -737,7 +741,7 @@ var App=(function(){
     var haPanel = !isHA ? "" :
       ("<div class='panel'>"+
          "<h2 style='margin-bottom:12px'>Home-Assistant-Verbindung</h2>"+
-         "<div class='grid-fee'>"+tfld("haURL","HA-URL (Nabu Casa)","https://….ui.nabu.casa")+tfld("haToken","Long-Lived Access Token","Token aus HA-Profil","password")+tflds(HATEXT)+"</div>"+
+         "<div class='grid-fee'>"+tfld("haURL","HA-URL (Nabu Casa)","https://….ui.nabu.casa")+tfld("haToken","Long-Lived Access Token","Token aus HA-Profil","password")+tflds(HATEXT)+flds(HACAP)+"</div>"+
          "<div class='row' style='margin-top:12px'><div class='note' id='cmp-hastatus'></div>"+
          "<button class='btn' onclick=\"App.haConnect()\">Verbinden &amp; Laden</button></div>"+
          "<div class='note' id='cmp-note' style='margin-top:10px'></div>"+
@@ -793,7 +797,8 @@ var App=(function(){
     var saves=r.diff>=0, win=saves?C.teal:C.amber;
     if(noteEl){
       noteEl.innerHTML = (r.source==="ha")
-        ? ("Sensoren: Netzbezug "+(cmp.haImport||"–")+(cmp.haExport?(", Einspeisung "+cmp.haExport):"")+(cmp.haPV?(", PV "+cmp.haPV):"")+".")
+        ? ("Sensoren: Netzbezug "+(cmp.haImport||"–")+(cmp.haExport?(", Einspeisung "+cmp.haExport):"")+(cmp.haPV?(", PV "+cmp.haPV):"")+". "+
+           "Plausibilitätsfilter: "+ (r.diagSkip||0) +" Stunden über "+num(r.cap,0)+" kWh/h verworfen (größter Rohwert "+num(r.diagMax||0,1)+" kWh/h).")
         : ( r.usePV
             ? ("PV "+num(+cmp.kwp,1)+" kWp + "+num(+cmp.batt,1)+" kWh Speicher, "+num(+cmp.yield,0)+" kWh/kWp·a. EV "+num(cmp.smart,0)+" kWh/Monat (PV-Vorrang, Rest günstigste "+num(cmp.smartHours,0)+" h/Tag).")
             : ("Ohne PV. EV "+num(cmp.smart,0)+" kWh/Monat in die günstigsten "+num(cmp.smartHours,0)+" h/Tag.") );
